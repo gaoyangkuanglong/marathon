@@ -76,10 +76,10 @@ final case class DeploymentPlan(
 
   def nonEmpty: Boolean = !isEmpty
 
-  def affectedApplications: Set[AppDefinition] = steps.flatMap(_.actions.map(_.app)).toSet
+  def affectedApplications: Set[AppDefinition] = steps.flatMap(_.actions.map(_.app))(collection.breakOut)
 
   /** @return all ids of apps which are referenced in any deployment actions */
-  lazy val affectedApplicationIds: Set[PathId] = steps.flatMap(_.actions.map(_.app.id)).toSet
+  lazy val affectedApplicationIds: Set[PathId] = steps.flatMap(_.actions.map(_.app.id))(collection.breakOut)
 
   def isAffectedBy(other: DeploymentPlan): Boolean =
     // FIXME: check for group change conflicts?
@@ -179,6 +179,7 @@ object DeploymentPlan {
     import org.jgrapht.graph.DefaultEdge
 
     def longestPathFromVertex[V](g: DirectedGraph[V, DefaultEdge], vertex: V): Seq[V] = {
+
       val outgoingEdges: Set[DefaultEdge] =
         if (g.containsVertex(vertex)) g.outgoingEdgesOf(vertex).asScala.toSet
         else Set[DefaultEdge]()
@@ -284,17 +285,13 @@ object DeploymentPlan {
     )
 
     // applications that are either new or the specs are different should be considered for the dependency graph
-    val addedOrChanged: Set[PathId] = targetApps.flatMap {
-      case (appId, spec) =>
-        if (!originalApps.contains(appId) ||
-          (originalApps.contains(appId) && originalApps(appId) != spec)) {
-          // the above could be optimized/refined further by checking the version info. The tests are actually
-          // really bad about structuring this correctly though, so for now, we just make sure that
-          // the specs are different (or brand new)
-          Some(appId)
-        } else {
-          None
-        }
+    val addedOrChanged: Set[PathId] = targetApps.collect {
+      case (appId, spec) if (!originalApps.contains(appId) ||
+        (originalApps.contains(appId) && originalApps(appId) != spec)) =>
+        // the above could be optimized/refined further by checking the version info. The tests are actually
+        // really bad about structuring this correctly though, so for now, we just make sure that
+        // the specs are different (or brand new)
+        appId
     }(collection.breakOut)
     val affectedApplications = addedOrChanged ++ (originalApps.keySet -- targetApps.keySet)
 

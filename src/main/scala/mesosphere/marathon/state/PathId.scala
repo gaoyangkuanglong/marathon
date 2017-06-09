@@ -81,12 +81,12 @@ case class PathId(path: List[String], absolute: Boolean = true) extends Ordered[
 
   override def equals(obj: Any): Boolean = {
     obj match {
-      case that: PathId => (that eq this) || (that.toString == toString)
+      case that: PathId => (that eq this) || (that.hashCode == hashCode && that.absolute == absolute && that.path == path)
       case _ => false
     }
   }
 
-  override def hashCode(): Int = toString.hashCode()
+  override val hashCode: Int = scala.util.hashing.MurmurHash3.productHash(this)
 }
 
 object PathId {

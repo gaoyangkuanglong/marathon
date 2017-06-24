@@ -12,6 +12,7 @@ import com.typesafe.scalalogging.StrictLogging
 import mesosphere.marathon.Protos.StorageVersion
 import mesosphere.marathon.core.storage.store.impl.BasePersistenceStore
 import mesosphere.marathon.core.storage.store.{ IdResolver, PersistenceStore }
+import mesosphere.marathon.metrics.Metrics
 import mesosphere.marathon.storage.VersionCacheConfig
 import mesosphere.marathon.stream.Sink
 import mesosphere.marathon.util.KeyedLock
@@ -34,7 +35,8 @@ import scala.util.Random
 case class LazyCachingPersistenceStore[K, Category, Serialized](
     store: BasePersistenceStore[K, Category, Serialized])(implicit
   mat: Materializer,
-    ctx: ExecutionContext) extends PersistenceStore[K, Category, Serialized] with StrictLogging {
+    ctx: ExecutionContext,
+    metrics: Metrics) extends PersistenceStore[K, Category, Serialized] with StrictLogging {
 
   private val lock = KeyedLock[String]("LazyCachingStore", Int.MaxValue)
   private[store] val idCache = TrieMap.empty[Category, Set[Any]]
@@ -94,6 +96,8 @@ case class LazyCachingPersistenceStore[K, Category, Serialized](
     deleteCurrentOrAll(k, () => store.deleteAll(k))
   }
 
+  val counters = TrieMap.empty[Category, Metrics.Counter]
+
   @SuppressWarnings(Array("all")) // async/await
   override def get[Id, V](id: Id)(implicit
     ir: IdResolver[Id, V, Category, K],
@@ -103,6 +107,7 @@ case class LazyCachingPersistenceStore[K, Category, Serialized](
       val cached = valueCache.get(storageId) // linter:ignore OptionOfOption
       cached match {
         case Some(v: Option[V] @unchecked) =>
+          counters.getOrElseUpdate(ir.category, metrics.counter(s"LazyCachingPersistenceStore.get:${ir.category}")).inc()
           Future.successful(v)
         case _ =>
           async { // linter:ignore UnnecessaryElseBranch

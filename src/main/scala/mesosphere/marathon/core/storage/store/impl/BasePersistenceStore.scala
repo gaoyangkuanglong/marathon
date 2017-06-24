@@ -10,9 +10,11 @@ import akka.stream.scaladsl.Source
 import akka.{ Done, NotUsed }
 import com.typesafe.scalalogging.StrictLogging
 import mesosphere.marathon.core.storage.store.{ IdResolver, PersistenceStore }
+import mesosphere.marathon.metrics.Metrics
 import mesosphere.marathon.util.KeyedLock
 
 import scala.async.Async.{ async, await }
+import scala.collection.concurrent.TrieMap
 import scala.concurrent.{ ExecutionContext, Future }
 
 case class CategorizedKey[C, K](category: C, key: K)
@@ -33,9 +35,12 @@ case class CategorizedKey[C, K](category: C, key: K)
   */
 abstract class BasePersistenceStore[K, Category, Serialized](implicit
   ctx: ExecutionContext,
-  mat: Materializer) extends PersistenceStore[K, Category, Serialized]
+  mat: Materializer,
+  metrics: Metrics) extends PersistenceStore[K, Category, Serialized]
     with TimedPersistenceStore[K, Category, Serialized] with StrictLogging {
 
+  private[this] val getTimers = TrieMap.empty[Category, Metrics.Timer]
+  private[this] val storeTimers = TrieMap.empty[Category, Metrics.Timer]
   private[this] lazy val lock = KeyedLock[String]("persistenceStore", Int.MaxValue)
 
   protected def rawIds(id: Category): Source[K, NotUsed]
@@ -82,15 +87,19 @@ abstract class BasePersistenceStore[K, Category, Serialized](implicit
   @SuppressWarnings(Array("all")) // async/await
   override def get[Id, V](id: Id)(implicit
     ir: IdResolver[Id, V, Category, K],
-    um: Unmarshaller[Serialized, V]): Future[Option[V]] = async { // linter:ignore UnnecessaryElseBranch
-    val storageId = ir.toStorageId(id, None)
-    await(rawGet(storageId)) match {
-      case Some(v) =>
-        Some(await(Unmarshal(v).to[V]))
-      case None =>
-        None
+    um: Unmarshaller[Serialized, V]): Future[Option[V]] =
+    getTimers.getOrElseUpdate(ir.category, metrics.timer(s"${getClass.getName}.get:${ir.category}")).timeFuture {
+      async { // linter:ignore UnnecessaryElseBranch
+        val storageId = ir.toStorageId(id, None)
+
+        await(rawGet(storageId)) match {
+          case Some(v) =>
+            Some(await(Unmarshal(v).to[V]))
+          case None =>
+            None
+        }
+      }
     }
-  }
 
   @SuppressWarnings(Array("all")) // async/await
   override def get[Id, V](id: Id, version: OffsetDateTime)(implicit
@@ -113,17 +122,19 @@ abstract class BasePersistenceStore[K, Category, Serialized](implicit
     m: Marshaller[V, Serialized]): Future[Done] = {
     val unversionedId = ir.toStorageId(id, None)
     lock(id.toString) {
-      async {
-        val serialized = await(Marshal(v).to[Serialized])
-        val storeCurrent = rawStore(unversionedId, serialized)
-        val storeVersioned = if (ir.hasVersions) {
-          rawStore(ir.toStorageId(id, Some(ir.version(v))), serialized)
-        } else {
-          Future.successful(Done)
+      storeTimers.getOrElseUpdate(ir.category, metrics.timer(s"${getClass.getName}.store:${ir.category}")).timeFuture {
+        async {
+          val serialized = await(Marshal(v).to[Serialized])
+          val storeCurrent = rawStore(unversionedId, serialized)
+          val storeVersioned = if (ir.hasVersions) {
+            rawStore(ir.toStorageId(id, Some(ir.version(v))), serialized)
+          } else {
+            Future.successful(Done)
+          }
+          await(storeCurrent)
+          await(storeVersioned)
+          Done
         }
-        await(storeCurrent)
-        await(storeVersioned)
-        Done
       }
     }
   }

@@ -11,10 +11,14 @@ import scala.util.control.NonFatal
 
 object PortAllocator extends StrictLogging {
 
-  //The Internet Assigned Numbers Authority (IANA) suggests the range 49152 to 65535
+  // https://en.wikipedia.org/wiki/Ephemeral_port
+  // The Internet Assigned Numbers Authority (IANA) suggests the range 49152 to 65535  for dynamic or private ports.
   val PORT_MAX = 65535
   val portCounter: AtomicInteger = new AtomicInteger(49152)
 
+  // Make sure the same ephemeral port is not given out twice making port collisions less likely. We're iterating
+  // over ephemeral port range trying to open a socket and if successful return the port number. Should we ever run
+  // out of free ephemeral port a RuntimeException is thrown.
   @tailrec
   def freeSocket(): ServerSocket = {
     val port = portCounter.incrementAndGet()

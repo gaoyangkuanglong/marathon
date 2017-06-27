@@ -2,7 +2,7 @@ package mesosphere.marathon
 package integration.setup
 
 import java.io.File
-import java.nio.file.Files
+import java.nio.file.{ Files, Paths }
 
 import akka.Done
 import akka.actor.{ ActorSystem, Scheduler }
@@ -20,134 +20,13 @@ import scala.async.Async._
 import scala.concurrent.duration._
 import scala.concurrent.{ Await, ExecutionContext, Future }
 import scala.sys.process.Process
-import scala.util.Try
+import scala.util.{ Failure, Success, Try }
 
 case class MesosConfig(
   launcher: String = "posix",
   containerizers: String = "mesos",
   isolation: Option[String] = None,
   imageProviders: Option[String] = None)
-
-/**
-  * Runs a mesos-local on a ephemeral port
-  *
-  * close() should be called when the server is no longer necessary
-  */
-case class MesosLocal(
-    suiteName: String,
-    numSlaves: Int = 1,
-    autoStart: Boolean = true,
-    config: MesosConfig = MesosConfig(),
-    waitForStart: FiniteDuration = 5.minutes)(implicit
-  system: ActorSystem,
-    mat: Materializer,
-    ctx: ExecutionContext,
-    scheduler: Scheduler) extends AutoCloseable {
-  lazy val port = PortAllocator.ephemeralPort()
-  lazy val masterUrl = s"127.0.0.1:$port"
-
-  private def write(dir: File, fileName: String, content: String): String = {
-    val file = File.createTempFile(fileName, "", dir)
-    file.deleteOnExit()
-    FileUtils.write(file, content)
-    file.setReadable(true)
-    file.getAbsolutePath
-  }
-
-  private lazy val mesosWorkDir = {
-    val tmp = Files.createTempDirectory("mesos-local").toFile
-    tmp.deleteOnExit()
-    tmp
-  }
-
-  private lazy val mesosEnv = {
-    val credentialsPath = write(mesosWorkDir, fileName = "credentials", content = "principal1 secret1")
-    val aclsPath = write(mesosWorkDir, fileName = "acls.json", content =
-      """
-        |{
-        |  "run_tasks": [{
-        |    "principals": { "type": "ANY" },
-        |    "users": { "type": "ANY" }
-        |  }],
-        |  "register_frameworks": [{
-        |    "principals": { "type": "ANY" },
-        |    "roles": { "type": "ANY" }
-        |  }],
-        |  "reserve_resources": [{
-        |    "roles": { "type": "ANY" },
-        |    "principals": { "type": "ANY" },
-        |    "resources": { "type": "ANY" }
-        |  }],
-        |  "create_volumes": [{
-        |    "roles": { "type": "ANY" },
-        |    "principals": { "type": "ANY" },
-        |    "volume_types": { "type": "ANY" }
-        |  }]
-        |}
-      """.stripMargin)
-
-    Seq(
-      "MESOS_WORK_DIR" -> mesosWorkDir.getAbsolutePath,
-      "MESOS_RUNTIME_DIR" -> new File(mesosWorkDir, "runtime").getAbsolutePath,
-      "MESOS_LAUNCHER" -> "posix",
-      "MESOS_CONTAINERIZERS" -> config.containerizers,
-      "MESOS_LAUNCHER" -> config.launcher,
-      "MESOS_ROLES" -> "public,foo",
-      "MESOS_ACLS" -> s"file://$aclsPath",
-      "MESOS_CREDENTIALS" -> s"file://$credentialsPath",
-      "MESOS_SYSTEMD_ENABLE_SUPPORT" -> "false",
-      "MESOS_SWITCH_USER" -> "false") ++
-      config.isolation.map("MESOS_ISOLATION" -> _).to[Seq] ++
-      config.imageProviders.map("MESOS_IMAGE_PROVIDERS" -> _).to[Seq]
-  }
-
-  private def create(): Process = {
-    val process = Process(
-      s"mesos-local --ip=127.0.0.1 --port=$port --work_dir=${mesosWorkDir.getAbsolutePath}",
-      cwd = None, mesosEnv: _*)
-    process.run(ProcessOutputToLogStream(s"$suiteName-MesosLocal-$port"))
-  }
-
-  private var mesosLocal = Option.empty[Process]
-
-  if (autoStart) {
-    start()
-  }
-
-  def start(): Future[Done] = {
-    if (mesosLocal.isEmpty) {
-      mesosLocal = Some(create())
-    }
-    Retry(s"mesos-local-$port", Int.MaxValue, maxDelay = waitForStart) {
-      Http().singleRequest(Get(s"http://localhost:$port/version")).map { result =>
-        result.discardEntityBytes() // forget about the body
-        if (result.status.isSuccess()) {
-          Done
-        } else {
-          throw new Exception(s"Mesos-local-$port not available")
-        }
-      }
-    }
-  }
-
-  def stop(): Unit = {
-    mesosLocal.foreach { process =>
-      process.destroy()
-    }
-    mesosLocal = Option.empty[Process]
-  }
-
-  def clean(): Unit = {
-    val client = new MesosFacade(masterUrl)
-    MesosTest.clean(client)
-  }
-
-  override def close(): Unit = {
-    Try(clean())
-    Try(stop())
-    Try(FileUtils.deleteDirectory(mesosWorkDir))
-  }
-}
 
 case class MesosCluster(
     suiteName: String,
@@ -309,6 +188,18 @@ case class MesosCluster(
     }
 
     override def close(): Unit = {
+      def copySandboxFiles() = {
+        val projectDir = sys.props.getOrElse("user.dir", ".")
+        println(s">>> Copying sandbox files to from $workDir to $projectDir")
+        FileUtils.copyDirectory(workDir, Paths.get(projectDir, "sandboxes", suiteName).toFile)
+      }
+      // Copy all sandbox files (useful for debugging) into current directory
+      // for Jenkins to archive it:
+      Try(copySandboxFiles()) match {
+        case Success(_) =>
+        case Failure(ex) => println(s">>> Failed to copy sandbox files: ${ex}")
+      }
+
       stop()
       Try(FileUtils.deleteDirectory(workDir))
     }
@@ -363,41 +254,6 @@ trait SimulatedMesosTest extends MesosTest {
   }
   def cleanMesos(): Unit = {}
   val mesosMasterUrl = ""
-}
-
-/**
-  * Warning: mesos-local isn't super stable, prefer [[MesosClusterTest]]
-  */
-trait MesosLocalTest extends Suite with ScalaFutures with MesosTest with BeforeAndAfterAll {
-  implicit val system: ActorSystem
-  implicit val mat: Materializer
-  implicit val ctx: ExecutionContext
-  implicit val scheduler: Scheduler
-  lazy val mesosConfig = MesosConfig()
-
-  val mesosNumSlaves = 1
-
-  lazy val mesosLocalServer = MesosLocal(
-    suiteName = suiteName,
-    autoStart = false,
-    waitForStart = patienceConfig.timeout.toMillis.milliseconds,
-    config = mesosConfig,
-    numSlaves = mesosNumSlaves)
-  lazy val port = mesosLocalServer.port
-  lazy val mesosMasterUrl = mesosLocalServer.masterUrl
-  lazy val mesos = new MesosFacade(s"http://$mesosMasterUrl")
-
-  override def cleanMesos(): Unit = mesosLocalServer.clean()
-
-  abstract override def beforeAll(): Unit = {
-    super.beforeAll()
-    mesosLocalServer.start().futureValue
-  }
-
-  abstract override def afterAll(): Unit = {
-    mesosLocalServer.close()
-    super.afterAll()
-  }
 }
 
 trait MesosClusterTest extends Suite with ZookeeperServerTest with MesosTest with ScalaFutures {

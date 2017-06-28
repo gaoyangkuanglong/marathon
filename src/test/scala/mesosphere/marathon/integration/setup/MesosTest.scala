@@ -3,6 +3,7 @@ package integration.setup
 
 import java.io.File
 import java.nio.file.{ Files, Paths }
+import java.util.concurrent.atomic.AtomicInteger
 
 import akka.Done
 import akka.actor.{ ActorSystem, Scheduler }
@@ -13,8 +14,8 @@ import mesosphere.marathon.integration.facades.MesosFacade
 import mesosphere.marathon.util.Retry
 import mesosphere.util.PortAllocator
 import org.apache.commons.io.FileUtils
+import org.scalatest.Suite
 import org.scalatest.concurrent.ScalaFutures
-import org.scalatest.{ BeforeAndAfterAll, Suite }
 
 import scala.async.Async._
 import scala.concurrent.duration._
@@ -153,6 +154,7 @@ case class MesosCluster(
       config.imageProviders.map("MESOS_IMAGE_PROVIDERS" -> _).to[Seq]
   }
 
+  // format: OFF
   case class Mesos(master: Boolean, extraArgs: Seq[String]) extends AutoCloseable {
     val ip = IP.routableIPv4
     val port = PortAllocator.ephemeralPort()
@@ -164,6 +166,7 @@ case class MesosCluster(
       s"--ip=$ip",
       s"--hostname=$ip",
       s"--port=$port",
+      if (!master) s"${MesosCluster.resources()}" else "",
       if (master) s"--zk=$masterUrl" else s"--master=$masterUrl",
       s"--work_dir=${workDir.getAbsolutePath}") ++ extraArgs,
       cwd = None, extraEnv = mesosEnv(workDir): _*)
@@ -190,20 +193,15 @@ case class MesosCluster(
     override def close(): Unit = {
       def copySandboxFiles() = {
         val projectDir = sys.props.getOrElse("user.dir", ".")
-        println(s">>> Copying sandbox files to from $workDir to $projectDir")
         FileUtils.copyDirectory(workDir, Paths.get(projectDir, "sandboxes", suiteName).toFile)
       }
-      // Copy all sandbox files (useful for debugging) into current directory
-      // for Jenkins to archive it:
-      Try(copySandboxFiles()) match {
-        case Success(_) =>
-        case Failure(ex) => println(s">>> Failed to copy sandbox files: ${ex}")
-      }
-
+      // Copy all sandbox files (useful for debugging) into current directory for Jenkins to archive it:
+      Try(copySandboxFiles())
       stop()
       Try(FileUtils.deleteDirectory(workDir))
     }
   }
+  // format: ON
 
   def state = new MesosFacade(Await.result(waitForLeader(), waitForLeaderTimeout)).state
 
@@ -218,6 +216,26 @@ case class MesosCluster(
     masters.foreach(_.close())
   }
 
+}
+
+object MesosCluster {
+  val PORT_RANGE_START = 31000
+  val PORT_RANGE_STEP = 1000
+  val port = new AtomicInteger(PORT_RANGE_START)
+
+  // We can add additional resources constraints for our test cluster here.
+  // IMPORTANT: we give each cluster it's own port range! Otherwise every mesos will offer the same port range
+  // to it's marathon leading to multiple tasks (from different IT suits) trying to use the same port!
+  // First-come-first-served task will bind successfully where the others will fail leading to a lot inconsistency and
+  // flakiness in tests.
+  def resources(): String = {
+    s"--resources=${portsResource()}"
+  }
+
+  def portsResource(): String = {
+    val from = port.getAndAdd(PORT_RANGE_STEP)
+    s"ports:[$from-${from + 1000}]"
+  }
 }
 
 trait MesosTest {

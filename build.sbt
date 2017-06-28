@@ -22,6 +22,8 @@ resolvers ++= loadM2Resolvers(sLog.value)
 resolvers += Resolver.sonatypeRepo("snapshots")
 addCompilerPlugin("org.psywerx.hairyfotr" %% "linter" % "0.1.17")
 
+cleanFiles <+= baseDirectory { base => base / "sandboxes" }
+
 lazy val formatSettings = SbtScalariform.scalariformSettings ++ Seq(
   ScalariformKeys.preferences := FormattingPreferences()
     .setPreference(AlignArguments, false)

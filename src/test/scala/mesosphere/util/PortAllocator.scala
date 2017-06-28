@@ -14,11 +14,12 @@ object PortAllocator extends StrictLogging {
   // https://en.wikipedia.org/wiki/Ephemeral_port
   // The Internet Assigned Numbers Authority (IANA) suggests the range 49152 to 65535  for dynamic or private ports.
   val PORT_MAX = 65535
-  val portCounter: AtomicInteger = new AtomicInteger(49152)
+  val PORT_START = 49152
+  val portCounter: AtomicInteger = new AtomicInteger(PORT_START)
 
   // Make sure the same ephemeral port is not given out twice making port collisions less likely. We're iterating
   // over ephemeral port range trying to open a socket and if successful return the port number. Should we ever run
-  // out of free ephemeral port a RuntimeException is thrown.
+  // out of free ephemeral ports a RuntimeException is thrown.
   @tailrec
   def freeSocket(): ServerSocket = {
     val port = portCounter.incrementAndGet()
@@ -32,9 +33,8 @@ object PortAllocator extends StrictLogging {
   }
 
   def closeSocket(socket: ServerSocket) = {
-    try {
-      socket.close()
-    } catch { case NonFatal(ex) => logger.debug(s"Failed to close port allocator's socket because ${ex.getMessage}") }
+    try { socket.close() }
+    catch { case NonFatal(ex) => logger.debug(s"Failed to close port allocator's socket because ${ex.getMessage}") }
   }
 
   def ephemeralPort(): Int = {

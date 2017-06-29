@@ -213,9 +213,6 @@ class KeepAppsRunningDuringAbdicationIntegrationTest extends LeaderIntegrationTe
       val newInstances = newClient.tasks(app.id.toPath).value
       newInstances should have size 1 withClue "Previously started one instance did not survive the abdication"
       newInstances.head.id should be (oldInstances.head.id) withClue "During abdication we started a new instance, instead keeping the old one."
-
-      // allow ZK session for former leader to timeout before proceeding
-      Thread.sleep((zkTimeout * 2.5).toLong)
     }
   }
 }
@@ -242,16 +239,24 @@ class BackupRestoreIntegrationTest extends LeaderIntegrationTest {
       val leadingProcess1: LocalMarathon = leadingServerProcess(leader1.leader)
       val client1 = leadingProcess1.client
 
-      val app1 = App("/backuprestoreintegrationtest1", cmd = Some("sleep 1000"))
-      val app2 = App("/backuprestoreintegrationtest2", cmd = Some("sleep 1000"))
-      val app3 = App("/backuprestoreintegrationtest3", cmd = Some("sleep 1000"))
-      // scale plus modify
-      // running deployment
+      val app1 = App("/backuprestoreintegrationtest1delete", cmd = Some("sleep 1000"))
+      val app2 = App("/backuprestoreintegrationtest2update", cmd = Some("sleep 1000"))
+      val app3 = App("/backuprestoreintegrationtest3new", cmd = Some("sleep 1000"))
+      val app4 = App("/backuprestoreintegrationtest4scale", cmd = Some("sleep 1000"))
+      val app5 = App("/backuprestoreintegrationtest5deployment", cmd = Some("sleep 1000"), constraints = Set(Seq("hostname", "UNIQUE")), instances = 2)
+
       val tmpBackupFile = File.createTempFile("marathon", "BackupRestoreIntegrationTest")
+
+      val createApp5Response = client1.createAppV2(app5)
+      createApp5Response should be(Created)
 
       val createApp1Response = client1.createAppV2(app1)
       createApp1Response should be(Created)
       waitForDeployment(createApp1Response)
+
+      val createApp4Response = client1.createAppV2(app4)
+      createApp4Response should be(Created)
+      waitForDeployment(createApp4Response)
 
       val createApp2Response = client1.createAppV2(app2)
       createApp2Response should be(Created)
@@ -287,6 +292,10 @@ class BackupRestoreIntegrationTest extends LeaderIntegrationTest {
       updateApp2Response should be(OK)
       waitForDeployment(updateApp2Response)
 
+      val updateApp4Response = client2.updateApp(app2.id.toPath, AppUpdate(cmd = Some("sleep 50"), instances = Some(3)))
+      updateApp4Response should be(OK)
+      waitForDeployment(updateApp4Response)
+
       val createApp3Response = client2.createAppV2(app3)
       createApp3Response should be(Created)
       waitForDeployment(createApp3Response)
@@ -310,14 +319,24 @@ class BackupRestoreIntegrationTest extends LeaderIntegrationTest {
       waitForSSEConnect()
 
       client3.app(app1.id.toPath) should be (OK) withClue "App was not restored correctly"
-      client3.app(app3.id.toPath) should be (NotFound) withClue "App was not restored correctly"
 
       val app2Response = client3.app(app2.id.toPath)
-      app2Response should be (OK) withClue "App was not restored correctly"
-      app2Response.value.app.cmd should be (app2.cmd)
+      app2Response should be (OK) withClue "App2 was not restored correctly"
+      app2Response.value.app.cmd should be (app2.cmd) withClue "App2 was not restored correctly"
 
-      // allow ZK session for former leader to timeout before proceeding
-      Thread.sleep((zkTimeout * 2.5).toLong)
+      val app3Response = client3.app(app3.id.toPath)
+      app3Response should be (NotFound) withClue "App3 was not restored correctly"
+
+      val app4Response = client3.app(app2.id.toPath)
+      app4Response should be (OK) withClue "App4 was not restored correctly"
+      app4Response.value.app.cmd should be (app2.cmd) withClue "App4 was not restored correctly"
+      app4Response.value.app.instances should be (app2.instances) withClue "App4 was not restored correctly"
+
+      val app5Response = client3.app(app2.id.toPath)
+      app5Response should be (OK) withClue "App5 was not restored correctly"
+      // this app should still be stuck in deployment
+      client3.tasks(app5.id.toPath).value.size should be (1) withClue "App5 was not restored correctly"
+
     }
   }
 }
@@ -407,9 +426,6 @@ class DeleteAppAndBackupIntegrationTest extends LeaderIntegrationTest {
 
       And("app should not be available")
       client3.app(app.id.toPath) should be(NotFound)
-
-      // allow ZK session for former leader to timeout before proceeding
-      Thread.sleep((zkTimeout * 2.5).toLong)
     }
   }
 }

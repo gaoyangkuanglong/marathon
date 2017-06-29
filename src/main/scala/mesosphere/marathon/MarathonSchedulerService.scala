@@ -263,13 +263,13 @@ class MarathonSchedulerService @Inject() (
     // the migration to have marathon loaded the current valid state to the internal caches.
 
     // refresh group repository cache
-    Await.result(groupManager.refreshGroupCache(), Duration.Inf)
+    Await.result(groupManager.invalidateGroupCache(), Duration.Inf)
 
     // execute tasks, only the leader is allowed to
     migration.migrate()
 
     // refresh group repository again - migration or restore might changed zk state, this needs to be re-loaded
-    Await.result(groupManager.refreshGroupCache(), Duration.Inf)
+    Await.result(groupManager.invalidateGroupCache(), Duration.Inf)
   }
 
   override def stopLeadership(): Unit = synchronized {

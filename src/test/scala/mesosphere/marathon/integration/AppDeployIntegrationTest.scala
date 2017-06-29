@@ -207,11 +207,12 @@ class AppDeployIntegrationTest extends AkkaIntegrationTest with EmbeddedMarathon
 
     "create a simple app with a Marathon HTTP health check using port instead of portIndex" in {
       Given("a new app")
+      val port = mesosCluster.randomAgentPort()
       val app = appProxy(appId(Some("with-marathon-http-health-check-using-port")), "v1", instances = 1, healthCheck = None).
         copy(
-          portDefinitions = Option(raml.PortDefinitions(31000)),
+          portDefinitions = Option(raml.PortDefinitions(port)),
           requirePorts = true,
-          healthChecks = Set(ramlHealthCheck.copy(port = Some(31000), portIndex = None))
+          healthChecks = Set(ramlHealthCheck.copy(port = Some(port), portIndex = None))
         )
       val check = registerAppProxyHealthCheck(app.id.toPath, "v1", state = true)
 

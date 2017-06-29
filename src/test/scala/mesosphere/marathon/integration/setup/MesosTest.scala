@@ -21,7 +21,8 @@ import scala.async.Async._
 import scala.concurrent.duration._
 import scala.concurrent.{ Await, ExecutionContext, Future }
 import scala.sys.process.Process
-import scala.util.{ Failure, Success, Try }
+import scala.sys.process.ProcessBuilder
+import scala.util.Try
 
 case class MesosConfig(
   launcher: String = "posix",
@@ -45,7 +46,7 @@ case class MesosCluster(
   require(quorumSize > 0 && quorumSize <= numMasters)
 
   lazy val masters = 0.until(numMasters).map { i =>
-    Mesos(master = true, Seq(
+    Master(extraArgs = Seq(
       "--slave_ping_timeout=1secs",
       "--max_slave_ping_timeouts=4",
       s"--quorum=$quorumSize"))
@@ -53,7 +54,7 @@ case class MesosCluster(
 
   lazy val agents = 0.until(numSlaves).map { i =>
     // uniquely identify each agent node, useful for constraint matching
-    Mesos(master = false, Seq(
+    Agent(resources = new Resources(ports = MesosCluster.portsRange()), extraArgs = Seq(
       s"--attributes=node:$i"
     ))
   }
@@ -155,21 +156,27 @@ case class MesosCluster(
   }
 
   // format: OFF
-  case class Mesos(master: Boolean, extraArgs: Seq[String]) extends AutoCloseable {
+  case class Resources(cpus: Option[Int] = None, mem: Option[Int] = None, ports: (Int, Int)) {
+
+    // Generates mesos-agent resource string e.g. "cpus:2;mem:124;ports:[10000-110000]"
+    def resourceString(): String = {
+      val cpures = cpus.fold("")(c => s"cpus:$c")
+      s"""
+         |${cpus.fold("")(c => s"cpus:$c;")}
+         |${mem.fold("")(m => s"mem:$m;")}
+         |${ports match {case (f, t) => s"ports:[$f-$t]"}}
+       """.stripMargin.replaceAll("[\n\r]", "");
+    }
+  }
+  // format: ON
+
+  trait Mesos extends AutoCloseable {
+    val extraArgs: Seq[String]
     val ip = IP.routableIPv4
     val port = PortAllocator.ephemeralPort()
-    private val workDir = Files.createTempDirectory(s"mesos-master$port").toFile
-    private val processBuilder = Process(
-      command = Seq(
-      "mesos",
-      if (master) "master" else "slave",
-      s"--ip=$ip",
-      s"--hostname=$ip",
-      s"--port=$port",
-      if (!master) s"${MesosCluster.resources()}" else "",
-      if (master) s"--zk=$masterUrl" else s"--master=$masterUrl",
-      s"--work_dir=${workDir.getAbsolutePath}") ++ extraArgs,
-      cwd = None, extraEnv = mesosEnv(workDir): _*)
+    val workDir: File
+    val processBuilder: ProcessBuilder
+    val processName: String
     private var process = Option.empty[Process]
 
     if (autoStart) {
@@ -186,8 +193,7 @@ case class MesosCluster(
     }
 
     private def create(): Process = {
-      val name = if (master) "Master" else "Agent"
-      processBuilder.run(ProcessOutputToLogStream(s"$suiteName-Mesos$name-$port"))
+      processBuilder.run(ProcessOutputToLogStream(s"$suiteName-Mesos$processName-$port"))
     }
 
     override def close(): Unit = {
@@ -200,6 +206,40 @@ case class MesosCluster(
       stop()
       Try(FileUtils.deleteDirectory(workDir))
     }
+  }
+
+  // format: OFF
+  case class Master(extraArgs: Seq[String]) extends Mesos {
+    override val workDir = Files.createTempDirectory(s"mesos-master$port").toFile
+    override val processBuilder = Process(
+      command = Seq(
+      "mesos",
+      "master",
+      s"--ip=$ip",
+      s"--hostname=$ip",
+      s"--port=$port",
+      s"--zk=$masterUrl",
+      s"--work_dir=${workDir.getAbsolutePath}") ++ extraArgs,
+      cwd = None, extraEnv = mesosEnv(workDir): _*)
+
+    val processName: String = "Master"
+  }
+
+  case class Agent(resources: Resources, extraArgs: Seq[String]) extends Mesos {
+    override val workDir = Files.createTempDirectory(s"mesos-agent$port").toFile
+    override val processBuilder = Process(
+      command = Seq(
+        "mesos",
+        "agent",
+        s"--ip=$ip",
+        s"--hostname=$ip",
+        s"--port=$port",
+        s"--resources=${resources.resourceString()}",
+        s"--master=$masterUrl",
+        s"--work_dir=${workDir.getAbsolutePath}") ++ extraArgs,
+      cwd = None, extraEnv = mesosEnv(workDir): _*)
+
+    override val processName = "Agent"
   }
   // format: ON
 
@@ -216,7 +256,18 @@ case class MesosCluster(
     masters.foreach(_.close())
   }
 
+  // Get a random port from a random agent from the port range that was given to the agent during initialisation
+  // This is useful for integration tests that need to bind to an accessible port. It still can happen that the
+  // requested port is already bound but the chances should be slim. If not - blame @kjeschkies. Integration test
+  // suites should not use the same port twice in their tests.
+  def randomAgentPort(): Int = {
+    import scala.util.Random
+    val (min, max) = Random.shuffle(agents).head.resources.ports
+    val range = min to max
+    range(Random.nextInt(range.length))
+  }
 }
+// format: ON
 
 object MesosCluster {
   val PORT_RANGE_START = 31000
@@ -224,17 +275,14 @@ object MesosCluster {
   val port = new AtomicInteger(PORT_RANGE_START)
 
   // We can add additional resources constraints for our test cluster here.
-  // IMPORTANT: we give each cluster it's own port range! Otherwise every mesos will offer the same port range
-  // to it's marathon leading to multiple tasks (from different IT suits) trying to use the same port!
+  // IMPORTANT: we give each cluster's agent it's own port range! Otherwise every mesos will offer the same port range
+  // to it's marathon, leading to multiple tasks (from different IT suits) trying to use the same port!
   // First-come-first-served task will bind successfully where the others will fail leading to a lot inconsistency and
   // flakiness in tests.
-  def resources(): String = {
-    s"--resources=${portsResource()}"
-  }
-
-  def portsResource(): String = {
+  def portsRange(): (Int, Int) = {
     val from = port.getAndAdd(PORT_RANGE_STEP)
-    s"ports:[$from-${from + 1000}]"
+    val to = from + PORT_RANGE_STEP
+    (from, to)
   }
 }
 

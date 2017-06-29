@@ -53,9 +53,13 @@ case class MesosCluster(
   }
 
   lazy val agents = 0.until(numSlaves).map { i =>
-    // uniquely identify each agent node, useful for constraint matching
-    Agent(resources = new Resources(ports = MesosCluster.portsRange()), extraArgs = Seq(
-      s"--attributes=node:$i"
+    // We can add additional resources constraints for our test clusters here.
+    // IMPORTANT: we give each cluster's agent it's own port range! Otherwise every mesos will offer the same port range
+    // to it's marathon, leading to multiple tasks (from different IT suits) trying to use the same port!
+    // First-come-first-served task will bind successfully where the others will fail leading to a lot inconsistency and
+    // flakiness in tests.
+    Agent(resources = new Resources(ports = PortAllocator.portsRange()), extraArgs = Seq(
+      s"--attributes=node:$i" // uniquely identify each agent node, useful for constraint matching
     ))
   }
 
@@ -157,10 +161,8 @@ case class MesosCluster(
 
   // format: OFF
   case class Resources(cpus: Option[Int] = None, mem: Option[Int] = None, ports: (Int, Int)) {
-
     // Generates mesos-agent resource string e.g. "cpus:2;mem:124;ports:[10000-110000]"
     def resourceString(): String = {
-      val cpures = cpus.fold("")(c => s"cpus:$c")
       s"""
          |${cpus.fold("")(c => s"cpus:$c;")}
          |${mem.fold("")(m => s"mem:$m;")}
@@ -268,23 +270,6 @@ case class MesosCluster(
   }
 }
 // format: ON
-
-object MesosCluster {
-  val PORT_RANGE_START = 31000
-  val PORT_RANGE_STEP = 1000
-  val port = new AtomicInteger(PORT_RANGE_START)
-
-  // We can add additional resources constraints for our test cluster here.
-  // IMPORTANT: we give each cluster's agent it's own port range! Otherwise every mesos will offer the same port range
-  // to it's marathon, leading to multiple tasks (from different IT suits) trying to use the same port!
-  // First-come-first-served task will bind successfully where the others will fail leading to a lot inconsistency and
-  // flakiness in tests.
-  def portsRange(): (Int, Int) = {
-    val from = port.getAndAdd(PORT_RANGE_STEP)
-    val to = from + PORT_RANGE_STEP
-    (from, to)
-  }
-}
 
 trait MesosTest {
   def mesos: MesosFacade

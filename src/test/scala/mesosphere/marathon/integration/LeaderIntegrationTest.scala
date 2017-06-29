@@ -300,6 +300,10 @@ class BackupRestoreIntegrationTest extends LeaderIntegrationTest {
       createApp3Response should be(Created)
       waitForDeployment(createApp3Response)
 
+      val deleteApp5Response = client2.deleteApp(app3.id.toPath, force = true)
+      deleteApp5Response should be(OK)
+      waitForDeployment(deleteApp5Response)
+
       And("calling DELETE /v2/leader with restore")
       val abdicateResult2 = client2.abdicateWithRestore(tmpBackupFile.getAbsolutePath)
 
